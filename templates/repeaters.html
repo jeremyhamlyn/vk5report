@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% block title %}Repeater Map — Australia{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='lib/leaflet.css') }}">
+<style>
+  body { overflow: hidden; }
+  footer { display: none; }
+
+  .rep-bar {
+    position: fixed; top: 52px; left: 0; right: 0; z-index: 1000;
+    background: rgba(255,255,255,0.97);
+    border-bottom: 1px solid #dde1e7;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.1);
+    padding: 0.4rem 1rem;
+    display: flex; flex-direction: column; gap: 0.35rem;
+  }
+  .rbar-row { display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; }
+
+  /* Mode buttons */
+  .mode-btn {
+    padding: 0.22rem 0.75rem;
+    border-radius: 4px; border: 2px solid #ccc;
+    font-size: 0.8rem; font-weight: 700; cursor: pointer;
+    background: #fff; color: #666; transition: all 0.15s;
+  }
+  .mode-btn.active { color: #fff; border-color: transparent; }
+  .mode-btn:hover:not(.active) { background: #f0f4f8; }
+
+  /* Status legend chips */
+  .sleg { display:flex; align-items:center; gap:0.25rem; font-size:0.74rem; }
+  .sld  { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+  .sep  { width:1px; height:14px; background:#dde1e7; }
+
+  .rep-count { font-size:0.78rem; color:#7f8c8d; margin-left:auto; white-space:nowrap; }
+
+  #repmap {
+    position: fixed;
+    top: 120px;   /* overwritten by JS */
+    left: 0; right: 0; bottom: 0;
+    z-index: 1;
+  }
+
+  /* Mode colours (CSS vars referenced in JS) */
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="rep-bar" id="repBar">
+
+  <!-- Row 1: mode selector -->
+  <div class="rbar-row">
+    <strong style="font-size:0.8rem;color:#2c3e50">Mode:</strong>
+    <button class="mode-btn" id="mb-2m FM"    data-mode="2m FM"    onclick="setMode('2m FM')">2m FM</button>
+    <button class="mode-btn" id="mb-70cm FM"  data-mode="70cm FM"  onclick="setMode('70cm FM')">70cm FM</button>
+    <button class="mode-btn" id="mb-D-Star"   data-mode="D-Star"   onclick="setMode('D-Star')">D-Star</button>
+    <button class="mode-btn" id="mb-P25"      data-mode="P25"      onclick="setMode('P25')">P25</button>
+    <button class="mode-btn" id="mb-DMR"      data-mode="DMR"      onclick="setMode('DMR')">DMR</button>
+    <button class="mode-btn" id="mb-Fusion"   data-mode="Fusion"   onclick="setMode('Fusion')">Fusion</button>
+    <button class="mode-btn" id="mb-ATV"      data-mode="ATV"      onclick="setMode('ATV')">ATV</button>
+    <button class="mode-btn" id="mb-6m FM"    data-mode="6m FM"    onclick="setMode('6m FM')">6m FM</button>
+    <button class="mode-btn" id="mb-10m FM"   data-mode="10m FM"   onclick="setMode('10m FM')">10m FM</button>
+    <button class="mode-btn" id="mb-23cm FM"  data-mode="23cm FM"  onclick="setMode('23cm FM')">23cm FM</button>
+    <div class="sep"></div>
+    <span class="rep-count" id="repCount">—</span>
+  </div>
+
+  <!-- Row 2: status legend -->
+  <div class="rbar-row" style="font-size:0.74rem; gap:0.8rem;">
+    <span class="sleg"><span class="sld" style="background:#27ae60"></span> Operating</span>
+    <span class="sleg"><span class="sld" style="background:#f39c12"></span> Testing</span>
+    <span class="sleg"><span class="sld" style="background:#2980b9"></span> Proposed</span>
+    <span class="sleg"><span class="sld" style="background:#e74c3c"></span> Off Air</span>
+    <span class="sleg"><span class="sld" style="background:#8e44ad"></span> Lic Pending</span>
+    <span class="sleg"><span class="sld" style="background:#d4ac0d"></span> WIA Broadcast</span>
+    <span class="sleg"><span class="sld" style="background:#7f8c8d; border:1.5px solid #555"></span> Other</span>
+    <span style="margin-left:0.5rem;color:#7f8c8d;">Click marker for details</span>
+  </div>
+
+</div>
+
+<div id="repmap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='lib/leaflet.js') }}"></script>
+<script>
+// ── Mode appearance ───────────────────────────────────────────────────────
+var MODE_COL = {
+  '2m FM':   '#2980b9', '70cm FM': '#8e44ad', 'D-Star': '#e74c3c',
+  'P25':     '#27ae60', 'DMR':     '#f39c12', 'Fusion': '#00bcd4',
+  'ATV':     '#c0392b', '6m FM':   '#1a7a44', '10m FM': '#6c3483',
+  '23cm FM': '#d35400',
+};
+
+// Status → fill colour
+var STAT_COL = {
+  'O': '#27ae60', 'T': '#f39c12', 'P': '#2980b9',
+  'X': '#e74c3c', 'U': '#8e44ad', 'W': '#d4ac0d',
+};
+
+// ── Map ───────────────────────────────────────────────────────────────────
+function setRepTop() {
+  var bar = document.getElementById('repBar');
+  var h   = bar ? bar.offsetHeight : 90;
+  var el  = document.getElementById('repmap');
+  el.style.top = (52 + h) + 'px';
+  if (typeof repMap !== 'undefined') repMap.invalidateSize();
+}
+
+// Set top before Leaflet init
+(function(){
+  var bar = document.getElementById('repBar');
+  var h   = bar ? bar.offsetHeight : 90;
+  document.getElementById('repmap').style.top = (52 + h) + 'px';
+})();
+
+var repMap = L.map('repmap', { preferCanvas: true }).setView([-28, 134], 4);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  maxZoom: 18
+}).addTo(repMap);
+
+var repLayer = L.layerGroup().addTo(repMap);
+var curMode  = null;
+
+// ── Mode selection ────────────────────────────────────────────────────────
+function setMode(mode) {
+  curMode = mode;
+  var col = MODE_COL[mode] || '#555';
+  document.querySelectorAll('.mode-btn').forEach(function(b) {
+    if (b.dataset.mode === mode) {
+      b.classList.add('active');
+      b.style.background = col;
+      b.style.borderColor = col;
+    } else {
+      b.classList.remove('active');
+      b.style.background = '';
+      b.style.borderColor = '';
+    }
+  });
+  loadRepeaters(mode);
+}
+
+// ── Load & draw ───────────────────────────────────────────────────────────
+function loadRepeaters(mode) {
+  document.getElementById('repCount').textContent = 'Loading…';
+  repLayer.clearLayers();
+
+  fetch('/api/repeaters?mode=' + encodeURIComponent(mode))
+    .then(function(r){ return r.json(); })
+    .then(function(data) {
+      var shown = 0;
+      var modCol = MODE_COL[mode] || '#555';
+
+      data.forEach(function(r) {
+        if (r.lat == null || r.lon == null) return;
+        var sc = STAT_COL[r.status] || '#7f8c8d';
+        var radius = (r.status === 'O') ? 7 : 5;
+
+        // Format frequency nicely
+        function fmtFreq(f) {
+          if (f == null) return '—';
+          return f >= 1000 ? f.toFixed(3) + ' MHz' : f.toFixed(4) + ' MHz';
+        }
+
+        // Offset: show as ±MHz or +/- kHz
+        var offsetStr = '—';
+        if (r.output_freq != null && r.input_freq != null) {
+          var off = (r.output_freq - r.input_freq);
+          if (Math.abs(off) > 0.0001) {
+            offsetStr = (off > 0 ? '+' : '') + off.toFixed(4) + ' MHz';
+          } else {
+            offsetStr = 'Simplex';
+          }
+        }
+
+        var tone = r.tone ? r.tone + ' Hz CTCSS' : 'None';
+        var popup =
+          '<b style="color:' + modCol + '">' + r.callsign + '</b>' +
+          ' <span style="color:' + sc + ';font-weight:700">[' + (r.status||'?') + ']</span><br>' +
+          '<b>' + (mode) + '</b><br>' +
+          r.location + (r.service_area ? ' &mdash; ' + r.service_area : '') + '<br>' +
+          'Out: <b>' + fmtFreq(r.output_freq) + '</b>&nbsp; In: ' + fmtFreq(r.input_freq) +
+          '&nbsp; Offset: ' + offsetStr + '<br>' +
+          'Tone: ' + tone +
+          (r.erp ? '&nbsp;&nbsp;ERP: ' + r.erp + ' W' : '') +
+          (r.hasl ? '&nbsp;&nbsp;HASL: ' + r.hasl + ' m' : '') + '<br>' +
+          (r.sponsor ? 'Sponsor: ' + r.sponsor + '<br>' : '') +
+          (r.notes ? '<small style="color:#7f8c8d">Notes: ' + r.notes + '</small>' : '');
+
+        L.circleMarker([r.lat, r.lon], {
+          radius: radius,
+          fillColor: sc,
+          color: '#1a1a1a',
+          weight: r.status === 'O' ? 0.8 : 0.5,
+          fillOpacity: r.status === 'O' ? 0.88 : 0.55,
+        }).bindPopup(popup).addTo(repLayer);
+        shown++;
+      });
+
+      var total = data.length;
+      var noCoord = total - shown;
+      document.getElementById('repCount').textContent =
+        shown + ' shown' + (noCoord ? ' (' + noCoord + ' no coords)' : '') +
+        ' of ' + total + ' ' + mode + ' repeaters';
+
+      setRepTop();
+    })
+    .catch(function(e) {
+      document.getElementById('repCount').textContent = 'Error loading data';
+    });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+window.addEventListener('resize', setRepTop);
+window.addEventListener('load', function(){ setRepTop(); });
+
+// Default to 2m FM on load
+setMode('2m FM');
+</script>
+{% endblock %}

@@ -1,0 +1,487 @@
+{% extends "base.html" %}
+{% block title %}Data — VK5 Receivers{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  .section-block { margin-top: 1.6rem; }
+  .section-heading {
+    font-size: 1rem; font-weight: 700; color: #2c3e50;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    border-bottom: 2px solid #dde1e7; padding-bottom: 0.35rem; margin-bottom: 0.8rem;
+  }
+  .wspr-section-heading { border-color: #f39c12; color: #b7770d; }
+
+  /* WSPR station selector */
+  .wspr-stn-row {
+    display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+    margin-bottom: 0.8rem;
+  }
+  .wspr-stn-row label { font-size: 0.82rem; font-weight: 700; color: #7f8c8d; }
+  .wspr-stn-sel {
+    padding: 0.3rem 0.55rem; border: 1.5px solid #f39c12; border-radius: 4px;
+    font-size: 0.85rem; background: #fffbf3; color: #2c3e50;
+    min-width: 130px; cursor: pointer;
+  }
+  .wspr-stn-sel:focus { outline: none; border-color: #e67e22; }
+
+  /* Chart */
+  .wspr-chart-wrap {
+    position: relative; height: 220px;
+    background: #fafafa; border: 1px solid #e8e8e8; border-radius: 6px;
+    margin-bottom: 1rem; padding: 0.5rem;
+  }
+  .chart-overlay {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; font-size: 0.88rem; color: #aaa;
+    pointer-events: none;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+
+  <!-- Page header -->
+  <div class="page-hdr">
+    <h1 class="page-title">📡 VK5 Receiver Data</h1>
+    <p class="page-sub">Signals received in the last 10 minutes — PSKReporter and WSPR.</p>
+    <button class="refetch-btn" onclick="fetchAll()">↻ Fetch All Now</button>
+  </div>
+
+  <!-- ══ PSK Section ═══════════════════════════════════════════════════════ -->
+  <div class="section-block">
+    <div class="section-heading">PSKReporter</div>
+
+    <div class="stn-tabs" id="stnTabs">
+      {% for cs in stations %}
+      <button class="stn-tab {% if loop.first %}active{% endif %}"
+              id="stntab-{{ cs }}" onclick="showStation('{{ cs }}')">
+        {{ cs }}
+      </button>
+      {% endfor %}
+    </div>
+
+    {% set band_names = {-1:'LF', 0:'MF', 1:'160m', 3:'80m', 5:'60m', 7:'40m', 10:'30m', 14:'20m', 18:'17m', 21:'15m', 24:'12m', 28:'10m', 50:'6m', 70:'4m', 144:'2m', 432:'70cm'} %}
+
+    {% for cs in stations %}
+    {% set sd = stations_data[cs] %}
+    <div class="stn-panel {% if not loop.first %}hidden{% endif %}" id="stnpanel-{{ cs }}">
+
+      <div class="src-header psk-header">
+        <div class="src-stats">
+          <div class="src-stat"><strong>{{ sd.psk_stats.recent_10min }}</strong><em>spots (10 min)</em></div>
+          <div class="src-stat"><strong>{{ sd.psk_stats.total }}</strong><em>stored total</em></div>
+          {% if sd.psk_stats.max_distance_km %}<div class="src-stat"><strong>{{ sd.psk_stats.max_distance_km }} km</strong><em>max distance</em></div>{% endif %}
+          <div class="src-modes">
+            {% for m in sd.psk_stats.modes %}<span class="mode-badge">{{ m.mode }} <em>{{ m.cnt }}</em></span>{% endfor %}
+          </div>
+        </div>
+        <div class="src-fetch-info">
+          {% if sd.psk_last %}<span class="fetch-time">Last fetch: {{ sd.psk_last.fetched_at }} UTC &nbsp;•&nbsp; Status: <span class="{{ 'ok-text' if sd.psk_last.status == 'ok' else 'err-text' }}">{{ sd.psk_last.status }}</span></span>{% endif %}
+          <button class="mini-fetch-btn" onclick="fetchPsk('{{ cs }}')">Fetch Now</button>
+        </div>
+      </div>
+
+      <div class="filter-bar">
+        <input  id="{{ cs }}-psk-filter-tx"   type="text"  placeholder="Filter sender callsign" oninput="filterTable('{{ cs }}','psk')" class="filter-input">
+        <select id="{{ cs }}-psk-filter-mode" onchange="filterTable('{{ cs }}','psk')" class="filter-select">
+          <option value="">All modes</option>
+          {% set psk_modes = sd.psk_spots | map(attribute='mode') | select | unique | list %}
+          {% for m in psk_modes | sort %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+        </select>
+        <select id="{{ cs }}-psk-filter-band" onchange="filterTable('{{ cs }}','psk')" class="filter-select">
+          <option value="">All bands</option>
+          {% set psk_bands = sd.psk_spots | map(attribute='band') | select('ne', none) | unique | list | sort %}
+          {% for b in psk_bands %}<option value="{{ b }}">{{ band_names.get(b, b|string + 'MHz') }}</option>{% endfor %}
+        </select>
+        <span class="filter-count" id="{{ cs }}-psk-row-count">{{ sd.psk_spots | length }} rows</span>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="{{ cs }}-psk-table">
+          <thead>
+            <tr>
+              <th>RX</th><th>RX Grid</th><th>TX (heard)</th><th>TX Grid</th>
+              <th>DXCC</th><th>Mode</th><th>Band</th><th>Freq (MHz)</th>
+              <th>SNR (dB)</th><th>Spot Time (UTC)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% if sd.psk_spots %}{% for s in sd.psk_spots %}
+            <tr data-mode="{{ s.mode or '' }}" data-band="{{ s.band if s.band is not none else '' }}">
+              <td class="call psk-rx">{{ s.rx_sign }}</td>
+              <td class="grid">{{ s.rx_loc or '—' }}</td>
+              <td class="call psk-tx">{{ s.tx_sign }}</td>
+              <td class="grid">{{ s.tx_loc or '—' }}</td>
+              <td class="dxcc" title="{{ s.region or '' }}">{{ s.dxcc or '—' }}</td>
+              <td><span class="mode-tag">{{ s.mode or '?' }}</span></td>
+              <td><span class="band-tag">{{ band_names.get(s.band, (s.band|string + 'MHz') if s.band is not none else '—') }}</span></td>
+              <td class="freq">{% if s.frequency %}{{ "%.4f"|format(s.frequency/1e6) }}{% else %}—{% endif %}</td>
+              <td class="snr {% if s.snr is not none and s.snr > 0 %}snr-good{% elif s.snr is not none and s.snr < -20 %}snr-weak{% endif %}">
+                {{ s.snr if s.snr is not none else '—' }}
+              </td>
+              <td class="ts">{{ s.spot_time }}</td>
+            </tr>
+            {% endfor %}{% else %}
+            <tr><td colspan="10" class="no-data">No PSKReporter spots in the last 10 minutes.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+    </div><!-- /stn-panel -->
+    {% endfor %}
+  </div><!-- /PSK section -->
+
+  <!-- ══ WSPR Section ══════════════════════════════════════════════════════ -->
+  <div class="section-block">
+    <div class="section-heading wspr-section-heading">WSPR</div>
+
+    <!-- Station selector + time range -->
+    <div class="wspr-stn-row">
+      <label for="wsprStationSel">Station:</label>
+      <select id="wsprStationSel" class="wspr-stn-sel" onchange="switchWsprStn(this.value)">
+        {% for cs in wspr_stations %}
+        <option value="{{ cs }}" {% if loop.first %}selected{% endif %}>{{ cs }}</option>
+        {% endfor %}
+      </select>
+      <label for="wsprTimeRange" style="margin-left:0.6rem">Period:</label>
+      <select id="wsprTimeRange" class="wspr-stn-sel" onchange="reloadWsprChart()" style="min-width:90px">
+        <option value="180">3 hours</option>
+        <option value="360">6 hours</option>
+        <option value="720">12 hours</option>
+        <option value="1440">1 day</option>
+        <option value="2880">2 days</option>
+        <option value="4320">3 days</option>
+        <option value="10080">7 days</option>
+      </select>
+      <button class="mini-fetch-btn wspr-mini"
+              onclick="fetchWspr(document.getElementById('wsprStationSel').value)">Fetch Now</button>
+    </div>
+
+    <!-- SNR over time chart -->
+    <div class="wspr-chart-wrap">
+      <canvas id="wsprSnrChart"></canvas>
+      <div class="chart-overlay" id="wsprChartMsg">Loading…</div>
+    </div>
+
+    <!-- Per-station WSPR tables (pre-rendered, show/hide) -->
+    {% for cs in wspr_stations %}
+    {% set sd = stations_data[cs] %}
+    <div id="wspr-tbl-{{ cs }}" {% if not loop.first %}class="hidden"{% endif %}>
+
+      <div class="src-header wspr-header">
+        <div class="src-stats">
+          <div class="src-stat"><strong>{{ sd.wspr_stats.recent_10min }}</strong><em>spots (10 min)</em></div>
+          <div class="src-stat"><strong>{{ sd.wspr_stats.total }}</strong><em>stored total</em></div>
+          {% if sd.wspr_stats.max_distance_km %}<div class="src-stat"><strong>{{ sd.wspr_stats.max_distance_km }} km</strong><em>max distance</em></div>{% endif %}
+        </div>
+        <div class="src-fetch-info">
+          {% if sd.wspr_last %}<span class="fetch-time">Last fetch: {{ sd.wspr_last.fetched_at }} UTC &nbsp;•&nbsp; Status: <span class="{{ 'ok-text' if sd.wspr_last.status == 'ok' else 'err-text' }}">{{ sd.wspr_last.status }}</span></span>{% endif %}
+        </div>
+      </div>
+
+      <div class="filter-bar">
+        <input  id="{{ cs }}-wspr-filter-tx"   type="text" placeholder="Filter TX callsign"
+                oninput="filterTable('{{ cs }}','wspr')" class="filter-input">
+        <select id="{{ cs }}-wspr-filter-band" onchange="filterTable('{{ cs }}','wspr')" class="filter-select">
+          <option value="">All bands</option>
+          {% set wspr_bands = sd.wspr_spots | map(attribute='band') | select('ne', none) | unique | list | sort %}
+          {% for b in wspr_bands %}
+          <option value="{{ b }}">{{ band_names.get(b, b|string + 'MHz') }}</option>
+          {% endfor %}
+        </select>
+        <span class="filter-count" id="{{ cs }}-wspr-row-count">{{ sd.wspr_spots | length }} rows</span>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="{{ cs }}-wspr-table">
+          <thead>
+            <tr>
+              <th>RX ({{ cs }})</th><th>RX Grid</th><th>TX (heard)</th><th>TX Grid</th>
+              <th>Band</th><th>Freq (MHz)</th><th>Power (dBm)</th>
+              <th>SNR (dB)</th><th>Drift</th><th>Distance (km)</th><th>Spot Time (UTC)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% if sd.wspr_spots %}{% for s in sd.wspr_spots %}
+            <tr data-band="{{ s.band if s.band is not none else '' }}">
+              <td class="call psk-rx">{{ s.rx_sign }}</td>
+              <td class="grid">{{ s.rx_loc or '—' }}</td>
+              <td class="call wspr-tx">{{ s.tx_sign }}</td>
+              <td class="grid">{{ s.tx_loc or '—' }}</td>
+              <td><span class="band-tag">{{ band_names.get(s.band, (s.band|string + 'MHz') if s.band is not none else '—') }}</span></td>
+              <td class="freq">{% if s.frequency %}{{ "%.6f"|format(s.frequency/1e6) }}{% else %}—{% endif %}</td>
+              <td class="freq">{{ s.power if s.power is not none else '—' }}</td>
+              <td class="snr {% if s.snr is not none and s.snr > 0 %}snr-good{% elif s.snr is not none and s.snr < -20 %}snr-weak{% endif %}">
+                {{ s.snr if s.snr is not none else '—' }}
+              </td>
+              <td class="freq">{{ s.drift if s.drift is not none else '—' }}</td>
+              <td class="freq">{{ s.distance or '—' }}</td>
+              <td class="ts">{{ s.spot_time }}</td>
+            </tr>
+            {% endfor %}{% else %}
+            <tr><td colspan="11" class="no-data">No WSPR spots in the last 10 minutes.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div><!-- /wspr-tbl -->
+    {% endfor %}
+
+  </div><!-- /WSPR section -->
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+var activeStation = {{ stations[0] | tojson }};
+
+// ── PSK station tabs ──────────────────────────────────────────────────────
+function showStation(cs) {
+  document.querySelectorAll('.stn-tab').forEach(function(t){ t.classList.remove('active'); });
+  document.querySelectorAll('.stn-panel').forEach(function(p){ p.classList.add('hidden'); });
+  document.getElementById('stntab-' + cs).classList.add('active');
+  document.getElementById('stnpanel-' + cs).classList.remove('hidden');
+  activeStation = cs;
+}
+
+// ── Filter ────────────────────────────────────────────────────────────────
+function filterTable(cs, src) {
+  var tx   = (document.getElementById(cs+'-'+src+'-filter-tx')   || {value:''}).value.toUpperCase().trim();
+  var mode = (document.getElementById(cs+'-'+src+'-filter-mode') || {value:''}).value;
+  var band = (document.getElementById(cs+'-'+src+'-filter-band') || {value:''}).value;
+  var tbody = document.querySelector('#'+cs+'-'+src+'-table tbody');
+  if (!tbody) return;
+  var rows  = tbody.querySelectorAll('tr[data-mode], tr[data-band]');
+  var vis   = 0;
+  rows.forEach(function(row) {
+    var txCell = row.cells[2] ? row.cells[2].textContent.trim() : '';
+    var rMode  = row.dataset.mode || '';
+    var rBand  = row.dataset.band || '';
+    var show   = true;
+    if (tx   && txCell.indexOf(tx) < 0) show = false;
+    if (mode && rMode !== mode)          show = false;
+    if (band && rBand !== band)          show = false;
+    row.style.display = show ? '' : 'none';
+    if (show) vis++;
+  });
+  var counter = document.getElementById(cs+'-'+src+'-row-count');
+  if (counter) counter.textContent = vis + ' of ' + rows.length + ' rows';
+}
+
+// ── WSPR station switching ────────────────────────────────────────────────
+function switchWsprStn(cs) {
+  document.querySelectorAll('[id^="wspr-tbl-"]').forEach(function(p){
+    p.classList.add('hidden');
+  });
+  var panel = document.getElementById('wspr-tbl-' + cs);
+  if (panel) panel.classList.remove('hidden');
+  loadWsprChart(cs);
+}
+
+function reloadWsprChart() {
+  var cs = document.getElementById('wsprStationSel').value;
+  loadWsprChart(cs);
+}
+
+// ── WSPR SNR chart ────────────────────────────────────────────────────────
+var wsprChart = null;
+
+function loadWsprChart(cs) {
+  var minutes = parseInt(document.getElementById('wsprTimeRange').value) || 180;
+  var msg = document.getElementById('wsprChartMsg');
+  msg.style.display = '';
+  msg.textContent = 'Loading…';
+  fetch('/api/wspr-snr-chart?rx=' + encodeURIComponent(cs) + '&minutes=' + minutes)
+    .then(function(r){ return r.json(); })
+    .then(function(spots){ renderWsprChart(spots, cs, minutes); })
+    .catch(function(){ msg.textContent = 'Chart unavailable'; });
+}
+
+function renderWsprChart(spots, cs, minutes) {
+  var msg    = document.getElementById('wsprChartMsg');
+  var canvas = document.getElementById('wsprSnrChart');
+  var ctx    = canvas.getContext('2d');
+
+  if (wsprChart) { wsprChart.destroy(); wsprChart = null; }
+
+  if (!spots || !spots.length) {
+    msg.style.display = '';
+    msg.textContent = 'No WSPR data for ' + cs + ' in the selected period';
+    return;
+  }
+  msg.style.display = 'none';
+
+  var snrs     = spots.map(function(s){ return s.snr; });
+  var minSnr   = Math.min.apply(null, snrs);
+  var maxSnr   = Math.max.apply(null, snrs);
+  var GAP_MS   = 40 * 60 * 1000;
+  var now      = Date.now();
+  var winStart = now - minutes * 60 * 1000;
+
+  function toMs(t) { return new Date(t.replace(' ', 'T') + 'Z').getTime(); }
+
+  // Build a single combined dataset.
+  // Real spots: { x, y, isGap:false, tx }
+  // Gap filler: { x, y:minSnr, isGap:true }
+  // Segment coloring: any segment where either endpoint isGap → red; otherwise transparent.
+  var combined = [];
+
+  // Leading gap
+  var firstMs = toMs(spots[0].spot_time);
+  if (firstMs - winStart >= GAP_MS) {
+    combined.push({x: winStart,    y: minSnr, isGap: true});
+    combined.push({x: firstMs - 1, y: minSnr, isGap: true});
+  }
+
+  for (var i = 0; i < spots.length; i++) {
+    var tMs = toMs(spots[i].spot_time);
+    // Internal gap before this spot
+    if (i > 0) {
+      var prevMs = toMs(spots[i-1].spot_time);
+      if (tMs - prevMs >= GAP_MS) {
+        combined.push({x: prevMs + 1, y: minSnr, isGap: true});
+        combined.push({x: tMs - 1,   y: minSnr, isGap: true});
+      }
+    }
+    combined.push({x: tMs, y: spots[i].snr, isGap: false, tx: spots[i].tx_sign || ''});
+  }
+
+  // Trailing gap
+  var lastMs = toMs(spots[spots.length - 1].spot_time);
+  if (now - lastMs >= GAP_MS) {
+    combined.push({x: lastMs + 1, y: minSnr, isGap: true});
+    combined.push({x: now,        y: minSnr, isGap: true});
+  }
+
+  // X-axis tick formatter – shows HH:MM for short windows, D/M HH:MM for multi-day
+  function fmtTick(ms) {
+    var d = new Date(ms);
+    var hh = d.getUTCHours().toString().padStart(2,'0');
+    var mm = d.getUTCMinutes().toString().padStart(2,'0');
+    if (minutes <= 720) return hh + ':' + mm;
+    return (d.getUTCDate()) + '/' + (d.getUTCMonth()+1) + ' ' + hh + ':' + mm;
+  }
+
+  // Label for X axis title
+  var periodLabels = {180:'3 h',360:'6 h',720:'12 h',1440:'1 day',2880:'2 days',4320:'3 days',10080:'7 days'};
+  var xTitle = 'UTC Time — last ' + (periodLabels[minutes] || (minutes + ' min'));
+
+  wsprChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      datasets: [{
+        label: cs + ' SNR (dB)',
+        data: combined,
+        // Segment coloring: gap segments → red, real→real → transparent (dot-only)
+        segment: {
+          borderColor: function(seg) {
+            if (!seg.p0.raw || !seg.p1.raw) return 'transparent';
+            return (seg.p0.raw.isGap || seg.p1.raw.isGap) ? '#e74c3c' : 'transparent';
+          },
+          borderWidth: function(seg) {
+            if (!seg.p0.raw || !seg.p1.raw) return 0;
+            return (seg.p0.raw.isGap || seg.p1.raw.isGap) ? 2.5 : 0;
+          },
+        },
+        // Gap points: invisible; real points: blue dots
+        pointRadius: function(ctx) { return (ctx.raw && ctx.raw.isGap) ? 0 : 3; },
+        pointBackgroundColor: function(ctx) {
+          return (ctx.raw && ctx.raw.isGap) ? 'transparent' : 'rgba(52,152,219,0.85)';
+        },
+        pointHoverRadius: function(ctx) { return (ctx.raw && ctx.raw.isGap) ? 0 : 5; },
+        borderColor: 'transparent',  // default; overridden per-segment above
+        fill: false,
+        tension: 0,
+        spanGaps: false,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: true, position: 'top', labels: { boxWidth: 12, font: {size:11},
+          generateLabels: function(chart) {
+            return [
+              { text: cs + ' SNR (dB)', fillStyle: 'rgba(52,152,219,0.85)',
+                strokeStyle: 'rgba(52,152,219,0.85)', lineWidth: 1, hidden: false, datasetIndex: 0 },
+              { text: 'Gap ≥40 min (no signal)', fillStyle: '#e74c3c',
+                strokeStyle: '#e74c3c', lineWidth: 2.5, hidden: false, datasetIndex: 0 },
+            ];
+          }
+        }},
+        tooltip: {
+          filter: function(item) { return item.raw && !item.raw.isGap; },
+          callbacks: {
+            label: function(ctx) {
+              var r = ctx.raw;
+              return (r.tx ? r.tx + ' → ' : '') + r.y + ' dB';
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          min: winStart,
+          max: now,
+          ticks: { callback: fmtTick, maxTicksLimit: 13 },
+          title: { display: true, text: xTitle }
+        },
+        y: {
+          min: minSnr - 3,
+          max: maxSnr + 3,
+          title: { display: true, text: 'SNR (dB)' }
+        }
+      }
+    }
+  });
+}
+
+// ── Populate WSPR dropdown from DB (adds any stored stations not in template list) ──
+function populateWsprDropdown() {
+  fetch('/api/wspr-rx-stations')
+    .then(function(r){ return r.json(); })
+    .then(function(stations) {
+      var sel = document.getElementById('wsprStationSel');
+      var existing = new Set();
+      Array.from(sel.options).forEach(function(o){ existing.add(o.value); });
+      stations.forEach(function(cs) {
+        if (!existing.has(cs)) {
+          var opt = document.createElement('option');
+          opt.value = cs; opt.textContent = cs;
+          sel.appendChild(opt);
+        }
+      });
+    }).catch(function(){});
+}
+
+// ── Fetch buttons ─────────────────────────────────────────────────────────
+function fetchAll() {
+  fetch('/api/fetch-now', {method:'POST'})
+    .then(function(){ setTimeout(function(){ location.reload(); }, 6000); });
+}
+function fetchPsk(cs)  { fetchAll(); }
+function fetchWspr(cs) {
+  fetch('/api/fetch-now', {method:'POST'})
+    .then(function(){ setTimeout(function(){
+      loadWsprChart(cs);
+      location.reload();
+    }, 6000); });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+(function(){
+  populateWsprDropdown();
+  var sel = document.getElementById('wsprStationSel');
+  if (sel) loadWsprChart(sel.value);
+})();
+
+// Auto-refresh every 2 min
+setTimeout(function(){ location.reload(); }, 120000);
+</script>
+{% endblock %}

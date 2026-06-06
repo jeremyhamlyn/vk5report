@@ -1,0 +1,663 @@
+{% extends "base.html" %}
+{% block title %}Map — {{ callsign }} Report{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='lib/leaflet.css') }}">
+<style>
+  body { overflow: hidden; }
+  .map-bar {
+    position: fixed; top: 52px; left: 0; right: 0; z-index: 1000;
+    background: rgba(255,255,255,0.97);
+    border-bottom: 1px solid #dde1e7;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.1);
+    padding: 0.4rem 1rem;
+    display: flex; flex-direction: column; gap: 0.35rem;
+  }
+  .bar-row { display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap; }
+
+  /* Source toggles */
+  .src-tog { padding:0.2rem 0.7rem; border-radius:4px; border:2px solid; font-size:0.8rem; font-weight:700; cursor:pointer; background:#fff; }
+  .src-tog.psk-on   { border-color:#2980b9; background:#2980b9; color:#fff; }
+  .src-tog.wspr-on  { border-color:#f39c12; background:#f39c12; color:#fff; }
+  .src-tog.stn-on   { border-color:#2c3e50; background:#2c3e50; color:#fff; }
+  .src-tog.off      { border-color:#ccc; color:#bbb; background:#fff; }
+
+  /* Band toggles */
+  .band-row { display:flex; gap:0.3rem; align-items:center; flex-wrap:wrap; }
+  .band-lbl { font-size:0.72rem; font-weight:700; color:#7f8c8d; text-transform:uppercase; white-space:nowrap; }
+  .ball-btn  { padding:0.12rem 0.45rem; border-radius:3px; border:1.5px solid; font-size:0.74rem; font-weight:700; cursor:pointer; background:#fff; }
+  .ball-btn.on  { opacity:1; }
+  .ball-btn.off { opacity:0.28; background:#fff !important; color:#aaa !important; border-color:#ccc !important; }
+  .bq { padding:0.12rem 0.45rem; border:1px solid #bbb; border-radius:3px; font-size:0.72rem; background:#fff; color:#555; cursor:pointer; }
+  .bq:hover { background:#eee; }
+
+  /* Legend */
+  .leg-row { display:flex; gap:0.85rem; align-items:center; flex-wrap:wrap; font-size:0.78rem; }
+  .leg  { display:flex; align-items:center; gap:0.28rem; }
+  .ld   { width:11px; height:11px; border-radius:50%; border:1.5px solid rgba(0,0,0,0.2); flex-shrink:0; }
+  .l-psk-rx  { background:#2980b9; }
+  .l-wspr-rx { background:#f39c12; border-color:#b7770d; width:14px; height:14px; }
+  .l-band    { background:#27ae60; }
+  .sep { width:1px; height:14px; background:#dde1e7; }
+
+  /* Time range sliders */
+  .time-row { display:flex; gap:0.6rem; align-items:center; flex-wrap:wrap; }
+  .time-row label { font-size:0.72rem; font-weight:700; color:#7f8c8d; text-transform:uppercase; white-space:nowrap; }
+  .time-row input[type=range] { width:180px; cursor:pointer; accent-color:#2980b9; }
+  .time-val { font-size:0.82rem; font-weight:700; color:#2c3e50; min-width:52px; display:inline-block; }
+  .time-window { font-size:0.72rem; color:#7f8c8d; white-space:nowrap; }
+  .go-btn { padding:0.22rem 0.9rem; background:#27ae60; color:#fff; border:none; border-radius:4px;
+            font-size:0.82rem; font-weight:700; cursor:pointer; white-space:nowrap; }
+  .go-btn:hover { background:#1e8449; }
+  .go-btn.stale { background:#e67e22; }
+
+  .map-count { font-size:0.78rem; color:#7f8c8d; margin-left:auto; white-space:nowrap; }
+  .map-rfetch { padding:0.18rem 0.55rem; background:#2980b9; color:#fff; border:none; border-radius:4px; font-size:0.76rem; cursor:pointer; }
+  .map-rfetch:hover { background:#1a5276; }
+
+  footer { display: none; }
+  #map {
+    position: fixed;
+    top: 120px;   /* overwritten by setMapTop() once bar height is known */
+    left: 0; right: 0; bottom: 0;
+    z-index: 1;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="map-bar" id="mapBar">
+
+  <!-- Row 1: source + station toggles + count + fetch -->
+  <div class="bar-row">
+    <strong style="font-size:0.82rem;color:#2c3e50">Source:</strong>
+    <button class="src-tog psk-on"  id="togPsk"  onclick="toggleSrc('psk')">PSKReporter</button>
+    <button class="src-tog wspr-on" id="togWspr" onclick="toggleSrc('wspr')">WSPR</button>
+    <div class="sep"></div>
+    <strong style="font-size:0.82rem;color:#2c3e50">Station:</strong>
+    {% set all_map_stations = (stations + wspr_stations) | unique | list %}
+    {% for cs in all_map_stations %}
+    <button class="src-tog stn-on" id="togStn-{{ cs }}" data-cs="{{ cs }}" onclick="toggleStation('{{ cs }}')">{{ cs }}</button>
+    {% endfor %}
+    <div class="sep"></div>
+    <span class="map-count" id="mapCount">Loading…</span>
+    <button class="map-rfetch" onclick="fetchNow()">↻ Fetch Now</button>
+    <button class="map-rfetch" id="gcClearBtn" onclick="clearGC()" style="display:none;background:#e74c3c">✕ Clear path</button>
+  </div>
+
+  <!-- Row 2: legend (built by JS after STN_COLORS is ready) -->
+  <div class="bar-row" id="mapLegend" style="gap:1rem;font-size:0.78rem;"></div>
+
+  <!-- Row 3: band filter -->
+  <div class="band-row">
+    <span class="band-lbl">Bands:</span>
+    <button class="bq" onclick="allBands()">All</button>
+    <button class="bq" onclick="noBands()">None</button>
+    <span id="bandBtns"></span>
+  </div>
+
+  <!-- Row 4: time range (start / end sliders + Go) -->
+  <div class="time-row">
+    <label>Start:</label>
+    <input type="range" id="startSlider" min="1" max="25" value="1" step="1" oninput="onSliderMove()">
+    <span class="time-val" id="startLabel">15 min</span>
+    <label style="margin-left:0.4rem">End:</label>
+    <input type="range" id="endSlider"   min="0" max="24" value="0" step="1" oninput="onSliderMove()">
+    <span class="time-val" id="endLabel">Now</span>
+    <span class="time-window" id="timeWindow"></span>
+    <button class="go-btn" id="goBtn" onclick="doGo()">Go</button>
+  </div>
+
+</div>
+
+<div id="map"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='lib/leaflet.js') }}"></script>
+<script>
+// ── Constants ─────────────────────────────────────────────────────────────
+var STATIONS      = {{ stations | tojson }};
+var WSPR_STATIONS = {{ wspr_stations | tojson }};
+
+// Colour palettes (up to 12 stations each)
+var _PSK_PAL = [
+  ['#2980b9','#1a5276'],['#8e44ad','#6c3483'],['#27ae60','#1e8449'],
+  ['#e67e22','#ca6f1e'],['#16a085','#117a65'],['#c0392b','#a93226'],
+  ['#2471a3','#1a5276'],['#7d3c98','#6c3483'],['#117a65','#0b5345'],
+  ['#b7770d','#9c640c'],['#0e6655','#0b5345'],['#943126','#7b241c'],
+];
+var _WSPR_PAL = [
+  ['#f39c12','#b7770d'],['#e91e63','#c2185b'],['#00bcd4','#0097a7'],
+  ['#4caf50','#388e3c'],['#9c27b0','#7b1fa2'],['#ff5722','#e64a19'],
+  ['#607d8b','#455a64'],['#795548','#4e342e'],['#009688','#00695c'],
+  ['#ff9800','#e65100'],['#8bc34a','#558b2f'],['#03a9f4','#0277bd'],
+];
+
+// Per-station RX dot colours: [psk_fill, psk_stroke, wspr_fill, wspr_stroke]
+var STN_COLORS = {};
+STATIONS.forEach(function(cs, i) {
+  var p = _PSK_PAL[i % _PSK_PAL.length];
+  STN_COLORS[cs] = [p[0], p[1], '#aaa', '#888'];
+});
+WSPR_STATIONS.forEach(function(cs, i) {
+  var w = _WSPR_PAL[i % _WSPR_PAL.length];
+  if (!STN_COLORS[cs]) STN_COLORS[cs] = ['#aaa', '#888', w[0], w[1]];
+  else { STN_COLORS[cs][2] = w[0]; STN_COLORS[cs][3] = w[1]; }
+});
+
+// Build legend
+(function() {
+  var leg = document.getElementById('mapLegend');
+  if (!leg) return;
+  var html = '';
+  STATIONS.forEach(function(cs) {
+    var c = STN_COLORS[cs];
+    html += '<div class="leg"><div class="ld" style="background:'+c[0]+';border-color:'+c[1]+'"></div> '+cs+' PSK</div>';
+  });
+  WSPR_STATIONS.forEach(function(cs) {
+    var c = STN_COLORS[cs];
+    html += '<div class="leg"><div class="ld" style="background:'+c[2]+';border-color:'+c[3]+';width:14px;height:14px;border-radius:50%"></div> '+cs+' WSPR</div>';
+  });
+  html += '<div class="leg"><div class="ld l-band" style="background:#27ae60"></div> Sender (colour = band)</div>';
+  leg.innerHTML = html;
+})();
+
+var BANDS = {'-1':'LF','0':'MF','1':'160m','3':'80m','5':'60m','7':'40m',
+  '10':'30m','14':'20m','18':'17m','21':'15m','24':'12m','28':'10m',
+  '50':'6m','70':'4m','144':'2m','432':'70cm'};
+
+var BAND_COL = {
+  '-1':'#6c3483','0':'#5b2c6f','1':'#922b21','3':'#e74c3c','5':'#e67e22',
+  '7':'#f39c12','10':'#d4ac0d','14':'#27ae60','18':'#1e8449','21':'#2980b9',
+  '24':'#1a5276','28':'#8e44ad','50':'#c0392b','70':'#e91e63',
+  '144':'#00bcd4','432':'#009688'
+};
+
+// ── Map ───────────────────────────────────────────────────────────────────
+// Calculate bar height and resize Leaflet container
+function setMapTop() {
+  var bar = document.getElementById('mapBar');
+  var h   = bar ? bar.offsetHeight : 100;
+  document.getElementById('map').style.top = (52 + h) + 'px';
+  if (typeof leafMap !== 'undefined') {
+    leafMap.invalidateSize();
+  }
+}
+
+// Set map top BEFORE Leaflet init so the container has correct dimensions
+(function(){
+  var bar = document.getElementById('mapBar');
+  var h   = bar ? bar.offsetHeight : 100;
+  document.getElementById('map').style.top = (52 + h) + 'px';
+})();
+
+var leafMap = L.map('map', { preferCanvas: true }).setView([-28, 134], 4);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  maxZoom: 18
+}).addTo(leafMap);
+
+var pskGroup  = L.layerGroup().addTo(leafMap);
+var wsprGroup = L.layerGroup().addTo(leafMap);
+var gcGroup   = L.layerGroup().addTo(leafMap);   // great circle overlay
+
+// ── Great-circle maths ────────────────────────────────────────────────────
+function _toRad(d) { return d * Math.PI / 180; }
+function _toDeg(r) { return r * 180 / Math.PI; }
+
+function _ll2xyz(lat, lon) {
+  var la = _toRad(lat), lo = _toRad(lon);
+  return [Math.cos(la)*Math.cos(lo), Math.cos(la)*Math.sin(lo), Math.sin(la)];
+}
+function _xyz2ll(v) {
+  return [_toDeg(Math.asin(Math.max(-1, Math.min(1, v[2])))),
+          _toDeg(Math.atan2(v[1], v[0]))];
+}
+function _dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function _cross(a,b){
+  return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+}
+function _norm(v){ var m=Math.sqrt(_dot(v,v)); return m<1e-10?v:[v[0]/m,v[1]/m,v[2]/m]; }
+
+// Rodrigues rotation of v around unit-axis by angle alpha
+function _rotate(v, axis, alpha) {
+  var c=Math.cos(alpha), s=Math.sin(alpha), d=_dot(axis,v), cr=_cross(axis,v);
+  return [v[0]*c+cr[0]*s+axis[0]*d*(1-c),
+          v[1]*c+cr[1]*s+axis[1]*d*(1-c),
+          v[2]*c+cr[2]*s+axis[2]*d*(1-c)];
+}
+
+// Generate N+1 waypoints along a great-circle arc.
+// longPath=false → short arc; longPath=true → long arc (the other way round).
+function gcWaypoints(lat1, lon1, lat2, lon2, N, longPath) {
+  var P = _ll2xyz(lat1, lon1);
+  var Q = _ll2xyz(lat2, lon2);
+  var theta = Math.acos(Math.max(-1, Math.min(1, _dot(P, Q))));
+  var axRaw = _cross(P, Q);
+  var axLen = Math.sqrt(_dot(axRaw, axRaw));
+  if (axLen < 1e-10) return [[lat1,lon1],[lat2,lon2]];  // coincident / antipodal
+  var axis  = [axRaw[0]/axLen, axRaw[1]/axLen, axRaw[2]/axLen];
+  var totalAngle = longPath ? (2*Math.PI - theta) : theta;
+  var dir        = longPath ? -1 : 1;
+  var pts = [];
+  for (var i = 0; i <= N; i++) {
+    pts.push(_xyz2ll(_rotate(P, axis, dir*(i/N)*totalAngle)));
+  }
+  return pts;
+}
+
+// Split a lat/lon array at the antimeridian (|ΔLon| > 180).
+function splitAntimeridian(pts) {
+  var segs = [[]], cur = segs[0];
+  for (var i = 0; i < pts.length; i++) {
+    if (cur.length > 0 && Math.abs(pts[i][1] - cur[cur.length-1][1]) > 180) {
+      segs.push([]); cur = segs[segs.length-1];
+    }
+    cur.push(pts[i]);
+  }
+  return segs.filter(function(s){ return s.length > 1; });
+}
+
+function drawGC(rxLat, rxLon, txLat, txLon, col, label) {
+  gcGroup.clearLayers();
+  document.getElementById('gcClearBtn').style.display = '';
+  var N = 120;
+
+  // Short path — solid line
+  splitAntimeridian(gcWaypoints(rxLat, rxLon, txLat, txLon, N, false))
+    .forEach(function(seg){
+      L.polyline(seg, {color:col, weight:2.5, opacity:0.9}).addTo(gcGroup);
+    });
+
+  // Long path — dashed line
+  splitAntimeridian(gcWaypoints(rxLat, rxLon, txLat, txLon, N, true))
+    .forEach(function(seg){
+      L.polyline(seg, {color:col, weight:2, opacity:0.6, dashArray:'10,6'}).addTo(gcGroup);
+    });
+
+  // Mid-point labels
+  function midLabel(wpts, txt) {
+    var m = wpts[Math.floor(wpts.length/2)];
+    if (!m) return;
+    L.marker(m, {
+      icon: L.divIcon({
+        className: '',
+        html: '<span style="background:'+col+';color:#fff;font-size:0.68rem;font-weight:700;padding:1px 4px;border-radius:3px;white-space:nowrap;opacity:0.88">'+txt+'</span>',
+        iconAnchor: [30, 8]
+      })
+    }).addTo(gcGroup);
+  }
+  var shortPts = gcWaypoints(rxLat, rxLon, txLat, txLon, N, false);
+  var longPts  = gcWaypoints(rxLat, rxLon, txLat, txLon, N, true);
+  midLabel(shortPts, '↑ Short ' + label);
+  midLabel(longPts,  '↻ Long '  + label);
+}
+
+function clearGC() {
+  gcGroup.clearLayers();
+  document.getElementById('gcClearBtn').style.display = 'none';
+}
+
+// Click on blank map area clears GC lines
+leafMap.on('click', function(e) {
+  // Only clear if not clicking a marker (markers stop propagation)
+  clearGC();
+});
+
+// ── Time range sliders ────────────────────────────────────────────────────
+// Start slider positions 1..25:  1 = 15 min ago,  2..25 = 1..24 hrs ago
+// End   slider positions 0..24:  0 = now,          1 = 15 min ago, 2..24 = 1..23 hrs ago
+// Rule: start position must be > end position (start is further back).
+
+function posToMinutes(pos) {
+  // pos 0 = now (0 min), pos 1 = 15 min, pos 2+ = (pos-1)*60 min
+  if (pos === 0) return 0;
+  if (pos === 1) return 15;
+  return (pos - 1) * 60;
+}
+function posLabel(pos) {
+  if (pos === 0) return 'Now';
+  if (pos === 1) return '15 min';
+  var h = pos - 1;
+  return h + (h === 1 ? ' hr' : ' hrs');
+}
+
+var loadedStart = 1;   // slider pos used for last successful load
+var loadedEnd   = 0;
+
+function onSliderMove() {
+  var sp = parseInt(document.getElementById('startSlider').value);
+  var ep = parseInt(document.getElementById('endSlider').value);
+  // Enforce start > end
+  if (sp <= ep) {
+    ep = sp - 1;
+    if (ep < 0) { ep = 0; sp = 1; }
+    document.getElementById('startSlider').value = sp;
+    document.getElementById('endSlider').value   = ep;
+  }
+  document.getElementById('startLabel').textContent = posLabel(sp);
+  document.getElementById('endLabel').textContent   = posLabel(ep);
+  updateTimeWindow(sp, ep);
+  // Mark Go button as pending
+  var changed = (sp !== loadedStart || ep !== loadedEnd);
+  document.getElementById('goBtn').classList.toggle('stale', changed);
+}
+
+function updateTimeWindow(sp, ep) {
+  var now     = new Date();
+  var fromUTC = new Date(now.getTime() - posToMinutes(sp) * 60000);
+  var toUTC   = new Date(now.getTime() - posToMinutes(ep) * 60000);
+  document.getElementById('timeWindow').textContent =
+    fromUTC.toISOString().slice(11,16) + ' – ' +
+    (ep === 0 ? 'Now' : toUTC.toISOString().slice(11,16)) + ' UTC';
+}
+
+function doGo() {
+  loadedStart = parseInt(document.getElementById('startSlider').value);
+  loadedEnd   = parseInt(document.getElementById('endSlider').value);
+  document.getElementById('goBtn').classList.remove('stale');
+  loadData();
+}
+
+// Initialise labels
+(function(){
+  document.getElementById('startLabel').textContent = posLabel(1);
+  document.getElementById('endLabel').textContent   = posLabel(0);
+  updateTimeWindow(1, 0);
+})();
+
+// ── State ─────────────────────────────────────────────────────────────────
+var pskOn    = true;
+var wsprOn   = true;
+var pskData  = [];
+var wsprData = [];
+var offBands = new Set();   // excluded band keys
+var offStns  = new Set();   // excluded station callsigns
+
+// ── Source toggle ─────────────────────────────────────────────────────────
+function toggleSrc(which) {
+  if (which === 'psk') {
+    pskOn = !pskOn;
+    document.getElementById('togPsk').className = 'src-tog ' + (pskOn ? 'psk-on' : 'off');
+    pskOn ? leafMap.addLayer(pskGroup) : leafMap.removeLayer(pskGroup);
+  } else {
+    wsprOn = !wsprOn;
+    document.getElementById('togWspr').className = 'src-tog ' + (wsprOn ? 'wspr-on' : 'off');
+    wsprOn ? leafMap.addLayer(wsprGroup) : leafMap.removeLayer(wsprGroup);
+  }
+  updateCount();
+}
+
+// ── Station toggle ────────────────────────────────────────────────────────
+function toggleStation(cs) {
+  var on = !offStns.has(cs);   // currently on → turn off
+  if (on) {
+    offStns.add(cs);
+    document.getElementById('togStn-' + cs).className = 'src-tog off';
+  } else {
+    offStns.delete(cs);
+    document.getElementById('togStn-' + cs).className = 'src-tog stn-on';
+  }
+  redraw();
+}
+
+function stnPass(s) {
+  return offStns.size === 0 || !offStns.has(s.rx_sign);
+}
+
+// ── Band filter ───────────────────────────────────────────────────────────
+var DEFAULT_BANDS = new Set(['7', '14']);   // 40m and 20m on by default
+
+function buildBands() {
+  var allB = new Set();
+  pskData.forEach(function(d){ if (d.band != null) allB.add(String(d.band)); });
+  wsprData.forEach(function(d){ if (d.band != null) allB.add(String(d.band)); });
+  var sorted = [...allB].sort(function(a,b){ return Number(a)-Number(b); });
+
+  var wrap = document.getElementById('bandBtns');
+  var prev = {};
+  var firstBuild = wrap.querySelectorAll('.ball-btn').length === 0;
+  wrap.querySelectorAll('.ball-btn').forEach(function(b){ prev[b.dataset.k] = b.classList.contains('on'); });
+  wrap.innerHTML = '';
+
+  sorted.forEach(function(k) {
+    var col  = BAND_COL[k] || '#555';
+    var name = BANDS[k]    || k+'MHz';
+    // First build: use DEFAULT_BANDS; subsequent builds: preserve user state
+    var on   = firstBuild ? DEFAULT_BANDS.has(k) : ((k in prev) ? prev[k] : DEFAULT_BANDS.has(k));
+    if (!on) offBands.add(k); else offBands.delete(k);
+    var btn = document.createElement('button');
+    btn.className = 'ball-btn ' + (on ? 'on' : 'off');
+    btn.dataset.k = k;
+    btn.textContent = name;
+    btn.style.borderColor = col;
+    btn.style.color = on ? '#fff' : '';
+    btn.style.background = on ? col : '';
+    btn.onclick = function(){ toggleBand(k, col, btn); };
+    wrap.appendChild(btn);
+  });
+}
+
+function toggleBand(k, col, btn) {
+  var on = btn.classList.contains('on');
+  if (on) {
+    btn.classList.replace('on','off');
+    btn.style.background = ''; btn.style.color = '';
+    offBands.add(k);
+  } else {
+    btn.classList.replace('off','on');
+    btn.style.background = col; btn.style.color = '#fff';
+    offBands.delete(k);
+  }
+  redraw();
+}
+
+function allBands() {
+  offBands.clear();
+  document.querySelectorAll('.ball-btn').forEach(function(btn){
+    var col = BAND_COL[btn.dataset.k] || '#555';
+    btn.classList.remove('off'); btn.classList.add('on');
+    btn.style.background = col; btn.style.color = '#fff';
+  });
+  redraw();
+}
+
+function noBands() {
+  document.querySelectorAll('.ball-btn').forEach(function(btn){
+    offBands.add(btn.dataset.k);
+    btn.classList.remove('on'); btn.classList.add('off');
+    btn.style.background = ''; btn.style.color = '';
+  });
+  redraw();
+}
+
+function bandPass(s) {
+  return offBands.size === 0 || !offBands.has(String(s.band));
+}
+
+// ── Load data ─────────────────────────────────────────────────────────────
+function loadData() {
+  var sp = parseInt(document.getElementById('startSlider').value);
+  var ep = parseInt(document.getElementById('endSlider').value);
+  var startMin = posToMinutes(sp);
+  var endMin   = posToMinutes(ep);
+  var qs = '?start=' + startMin + '&end=' + endMin;
+  Promise.all([
+    fetch('/api/psk-spots'  + qs).then(function(r){ return r.json(); }).catch(function(){ return []; }),
+    fetch('/api/wspr-spots' + qs).then(function(r){ return r.json(); }).catch(function(){ return []; })
+  ]).then(function(res) {
+    pskData  = res[0] || [];
+    wsprData = res[1] || [];
+    buildBands();
+    setMapTop();   // re-measure after band buttons are added
+    redraw();
+  });
+}
+
+// ── Redraw ────────────────────────────────────────────────────────────────
+function filterData(arr) {
+  return arr.filter(function(s){ return bandPass(s) && stnPass(s); });
+}
+
+function redraw() {
+  drawPsk(filterData(pskData));
+  drawWspr(filterData(wsprData));
+  updateCount();
+}
+
+function updateCount() {
+  var fp = filterData(pskData).length;
+  var fw = filterData(wsprData).length;
+  document.getElementById('mapCount').textContent =
+    'PSK: ' + fp + '  |  WSPR: ' + fw;
+}
+
+// ── Draw PSK ──────────────────────────────────────────────────────────────
+function drawPsk(data) {
+  pskGroup.clearLayers();
+  if (!data.length) return;
+
+  // Group by rx_sign
+  var byRx = {};
+  data.forEach(function(s){ if (!byRx[s.rx_sign]) byRx[s.rx_sign] = []; byRx[s.rx_sign].push(s); });
+
+  Object.keys(byRx).forEach(function(cs) {
+    var spots   = byRx[cs];
+    var cols    = STN_COLORS[cs] || ['#2980b9','#1a5276','#f39c12','#b7770d'];
+    var rxFill  = cols[0], rxStroke = cols[1];
+    var rxLat = null, rxLon = null, rxLoc = null;
+    var seenTx  = {};
+
+    // Lines
+    spots.forEach(function(s) {
+      if (s.tx_lat == null || s.tx_lon == null) return;
+      if (s.rx_lat == null || s.rx_lon == null) return;
+      rxLat = s.rx_lat; rxLon = s.rx_lon; rxLoc = s.rx_loc;
+      var col = BAND_COL[String(s.band)] || rxFill;
+      L.polyline([[s.rx_lat, s.rx_lon],[s.tx_lat, s.tx_lon]],
+        {color: col, weight: 1, opacity: 0.25}).addTo(pskGroup);
+    });
+
+    // TX sender dots
+    spots.forEach(function(s) {
+      if (s.tx_lat == null || s.tx_lon == null) return;
+      if (seenTx[s.tx_sign]) return;
+      seenTx[s.tx_sign] = true;
+      var col = BAND_COL[String(s.band)] || rxFill;
+      var popup = '<b style="color:'+col+'">' + s.tx_sign + '</b> → <b>' + cs + '</b> (PSK)<br>' +
+        'Grid: ' + (s.tx_loc||'—') + '<br>' +
+        'DXCC: ' + (s.dxcc||'—') + (s.region ? ' / '+s.region : '') + '<br>' +
+        'Mode: ' + (s.mode||'?') + ' &nbsp; Band: ' + (BANDS[String(s.band)]||'?') + '<br>' +
+        'Freq: ' + (s.frequency ? (s.frequency/1e6).toFixed(4)+' MHz' : '—') + '<br>' +
+        'SNR: ' + (s.snr !== null && s.snr !== undefined ? s.snr+' dB' : '—') + '<br>' +
+        '<small>' + (s.spot_time||'') + ' UTC</small>';
+      (function(rLat, rLon, tLat, tLon, c, sign) {
+        L.circleMarker([tLat, tLon],
+          {radius:5, fillColor:c, color:'#1a1a1a', weight:0.8, fillOpacity:0.82})
+          .bindPopup(popup)
+          .on('click', function(e) {
+            L.DomEvent.stopPropagation(e);
+            drawGC(rLat, rLon, tLat, tLon, c, sign);
+          })
+          .addTo(pskGroup);
+      })(rxLat, rxLon, s.tx_lat, s.tx_lon, col, s.tx_sign);
+    });
+
+    // RX station dot
+    if (rxLat !== null) {
+      var txCount = Object.keys(seenTx).length;
+      L.circleMarker([rxLat, rxLon],
+        {radius:13, fillColor:rxFill, color:rxStroke, weight:3, fillOpacity:1})
+        .bindPopup('<b style="color:'+rxStroke+'">' + cs + '</b> (PSKReporter RX)<br>' +
+          'Grid: ' + (rxLoc||'—') + '<br>' +
+          'Hearing <b>' + txCount + '</b> senders (' + document.getElementById('timeWindow').textContent + ')<br>' +
+          '<a href="/data">Data table →</a>')
+        .addTo(pskGroup);
+    }
+  });
+}
+
+// ── Draw WSPR ─────────────────────────────────────────────────────────────
+function drawWspr(data) {
+  wsprGroup.clearLayers();
+  if (!data.length) return;
+
+  // Group by rx_sign
+  var byRx = {};
+  data.forEach(function(s){ if (!byRx[s.rx_sign]) byRx[s.rx_sign] = []; byRx[s.rx_sign].push(s); });
+
+  Object.keys(byRx).forEach(function(cs) {
+    var spots    = byRx[cs];
+    var cols     = STN_COLORS[cs] || ['#2980b9','#1a5276','#f39c12','#b7770d'];
+    var rxFill   = cols[2], rxStroke = cols[3];
+    var rxLat = null, rxLon = null, rxLoc = null;
+    var seenTx   = {};
+
+    // Lines (dashed)
+    spots.forEach(function(s) {
+      if (s.tx_lat == null || s.tx_lon == null) return;
+      if (s.rx_lat == null || s.rx_lon == null) return;
+      rxLat = s.rx_lat; rxLon = s.rx_lon; rxLoc = s.rx_loc;
+      var col = BAND_COL[String(s.band)] || rxFill;
+      L.polyline([[s.rx_lat, s.rx_lon],[s.tx_lat, s.tx_lon]],
+        {color: col, weight: 1.1, opacity: 0.28, dashArray:'5,4'}).addTo(wsprGroup);
+    });
+
+    // TX beacon dots
+    spots.forEach(function(s) {
+      if (s.tx_lat == null || s.tx_lon == null) return;
+      if (seenTx[s.tx_sign]) return;
+      seenTx[s.tx_sign] = true;
+      var col = BAND_COL[String(s.band)] || rxFill;
+      var popup = '<b style="color:'+col+'">' + s.tx_sign + '</b> → <b>' + cs + '</b> (WSPR)<br>' +
+        'Grid: ' + (s.tx_loc||'—') + '<br>' +
+        'Band: ' + (BANDS[String(s.band)]||'?') + ' &nbsp; ' +
+        (s.frequency ? (s.frequency/1e6).toFixed(4)+' MHz' : '') + '<br>' +
+        'SNR: ' + (s.snr !== null && s.snr !== undefined ? s.snr+' dB' : '—') +
+        ' &nbsp; Pwr: ' + (s.power !== null && s.power !== undefined ? s.power+' dBm' : '—') + '<br>' +
+        'Dist: ' + (s.distance ? s.distance+' km' : '—') + '<br>' +
+        '<small>' + (s.spot_time||'') + ' UTC</small>';
+      (function(rLat, rLon, tLat, tLon, c, sign) {
+        L.circleMarker([tLat, tLon],
+          {radius:6, fillColor:c, color:'#1a1a1a', weight:0.8, fillOpacity:0.85})
+          .bindPopup(popup)
+          .on('click', function(e) {
+            L.DomEvent.stopPropagation(e);
+            drawGC(rLat, rLon, tLat, tLon, c, sign);
+          })
+          .addTo(wsprGroup);
+      })(rxLat, rxLon, s.tx_lat, s.tx_lon, col, s.tx_sign);
+    });
+
+    // RX station dot
+    if (rxLat !== null) {
+      var txCount = Object.keys(seenTx).length;
+      L.circleMarker([rxLat, rxLon],
+        {radius:13, fillColor:rxFill, color:rxStroke, weight:3, fillOpacity:1})
+        .bindPopup('<b style="color:'+rxStroke+'">' + cs + '</b> (WSPR RX)<br>' +
+          'Grid: ' + (rxLoc||'—') + '<br>' +
+          'Hearing <b>' + txCount + '</b> beacons (' + document.getElementById('timeWindow').textContent + ')<br>' +
+          '<a href="/data">Data table →</a>')
+        .addTo(wsprGroup);
+    }
+  });
+}
+
+// ── Fetch ─────────────────────────────────────────────────────────────────
+function fetchNow() {
+  fetch('/api/fetch-now', {method:'POST'}).catch(function(){});
+  setTimeout(loadData, 5000);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+window.addEventListener('resize', setMapTop);
+window.addEventListener('load', function(){ setMapTop(); });
+// Initial load via Go (so loadedStart/End are set correctly)
+doGo();
+// Auto-refresh every 2 min only when end = Now
+setInterval(function(){
+  if (parseInt(document.getElementById('endSlider').value) === 0) doGo();
+}, 120000);
+</script>
+{% endblock %}

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}VK5 Report — PSKReporter{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <nav class="navbar">
+    <div class="nav-inner">
+      <a class="nav-brand" href="/">
+        <span class="brand-icon">📡</span>
+        VK5 Report
+      </a>
+      <div class="nav-links">
+        <a href="/data" class="nav-link {% if request.endpoint == 'data_page' or request.endpoint == 'index' %}active{% endif %}">
+          Data
+        </a>
+        <a href="/map" class="nav-link {% if request.endpoint == 'map_page' %}active{% endif %}">
+          Map
+        </a>
+        <a href="/repeaters" class="nav-link {% if request.endpoint == 'repeaters_page' %}active{% endif %}">
+          Repeaters
+        </a>
+      </div>
+      <div class="nav-status">
+        {% set fs = psk_fetcher_status or fetcher_status %}
+        <span class="status-dot {% if fs and fs.running %}green{% else %}red{% endif %}"></span>
+        <span class="status-label">
+          {% if fs and fs.last_fetch %}
+            PSK {{ fs.last_fetch }}
+          {% elif fs and fs.running %}
+            Running — awaiting first fetch
+          {% else %}
+            Fetcher stopped
+          {% endif %}
+        </span>
+      </div>
+    </div>
+  </nav>
+
+  <main class="main-content">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      Data sourced from <a href="https://pskreporter.info" target="_blank" rel="noopener">PSKReporter.info</a>
+      &mdash; VK5 receiving stations only &mdash; Not affiliated with ACMA or WIA.
+    </div>
+  </footer>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>
